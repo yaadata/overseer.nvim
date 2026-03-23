@@ -96,6 +96,12 @@ function SystemStrategy:get_bufnr()
   return self.bufnr
 end
 
+---@param bufnr nil|integer
+---@return boolean
+local function is_valid_buf(bufnr)
+  return bufnr ~= nil and vim.api.nvim_buf_is_valid(bufnr)
+end
+
 ---@param task overseer.Task
 function SystemStrategy:start(task)
   local wrap = self.opts.wrap_opts or {}
@@ -109,34 +115,43 @@ function SystemStrategy:start(task)
 
   ---@param data string
   local on_output = vim.schedule_wrap(function(data)
-    -- Update the buffer
-    -- Track which wins we will need to scroll
-    local trail_wins = {}
-    local line_count = vim.api.nvim_buf_line_count(self.bufnr)
-    for _, winid in ipairs(vim.api.nvim_list_wins()) do
-      if vim.api.nvim_win_is_valid(winid) and vim.api.nvim_win_get_buf(winid) == self.bufnr then
-        if vim.api.nvim_win_get_cursor(winid)[1] == line_count then
-          table.insert(trail_wins, winid)
+    local raw_data
+    if is_valid_buf(self.bufnr) then
+      -- Update the buffer
+      -- Track which wins we will need to scroll
+      local trail_wins = {}
+      local line_count = vim.api.nvim_buf_line_count(self.bufnr)
+      for _, winid in ipairs(vim.api.nvim_list_wins()) do
+        if vim.api.nvim_win_is_valid(winid) and vim.api.nvim_win_get_buf(winid) == self.bufnr then
+          if vim.api.nvim_win_get_cursor(winid)[1] == line_count then
+            table.insert(trail_wins, winid)
+          end
         end
       end
-    end
-    local end_line = vim.api.nvim_buf_get_lines(self.bufnr, -2, -1, true)[1] or ""
-    if not wrap.text then
-      data = data:gsub("\r", "")
-    end
-    local raw_data = vim.split(data, "\n")
-    local lines = raw_data
-    lines[1] = end_line .. lines[1]
-    vim.bo[self.bufnr].modifiable = true
-    vim.api.nvim_buf_set_lines(self.bufnr, -2, -1, true, lines)
-    vim.bo[self.bufnr].modifiable = false
-    vim.bo[self.bufnr].modified = false
+      local end_line = vim.api.nvim_buf_get_lines(self.bufnr, -2, -1, true)[1] or ""
+      if not wrap.text then
+        data = data:gsub("\r", "")
+      end
+      raw_data = vim.split(data, "\n")
+      local lines = raw_data
+      lines[1] = end_line .. lines[1]
+      vim.bo[self.bufnr].modifiable = true
+      vim.api.nvim_buf_set_lines(self.bufnr, -2, -1, true, lines)
+      vim.bo[self.bufnr].modifiable = false
+      vim.bo[self.bufnr].modified = false
 
-    -- Scroll to end of updated windows so we can tail output
-    local lnum = line_count + #lines - 1
-    local col = vim.api.nvim_strwidth(lines[#lines])
-    for _, winid in ipairs(trail_wins) do
-      vim.api.nvim_win_set_cursor(winid, { lnum, col })
+      -- Scroll to end of updated windows so we can tail output
+      local lnum = line_count + #lines - 1
+      local col = vim.api.nvim_strwidth(lines[#lines])
+      for _, winid in ipairs(trail_wins) do
+        vim.api.nvim_win_set_cursor(winid, { lnum, col })
+      end
+    else
+      -- Preserve task output events even when the display buffer was wiped.
+      if not wrap.text then
+        data = data:gsub("\r", "")
+      end
+      raw_data = vim.split(data, "\n")
     end
 
     -- Send output to task
@@ -210,16 +225,18 @@ function SystemStrategy:start(task)
       log.debug("Task %s exited with code %s", task.name, out.code)
       -- Feed one last line end to flush the output
       on_output("\n")
-      vim.bo[self.bufnr].modifiable = true
-      vim.api.nvim_buf_set_lines(
-        self.bufnr,
-        -1,
-        -1,
-        true,
-        { string.format("[Process exited %d]", out.code), "" }
-      )
-      vim.bo[self.bufnr].modifiable = false
-      vim.bo[self.bufnr].modified = false
+      if is_valid_buf(self.bufnr) then
+        vim.bo[self.bufnr].modifiable = true
+        vim.api.nvim_buf_set_lines(
+          self.bufnr,
+          -1,
+          -1,
+          true,
+          { string.format("[Process exited %d]", out.code), "" }
+        )
+        vim.bo[self.bufnr].modifiable = false
+        vim.bo[self.bufnr].modified = false
+      end
       self.handle = nil
       -- If we're exiting vim, don't call the on_exit handler
       -- We manually kill processes during VimLeavePre cleanup, and we don't want to trigger user
